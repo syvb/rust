@@ -1,3 +1,4 @@
+use crate::dataflow::generic::Results;
 use crate::dataflow::move_paths::{HasMoveData, LookupResult, MoveData, MovePathIndex};
 use crate::dataflow::DataflowResults;
 use crate::dataflow::MoveDataParamEnv;
@@ -40,15 +41,15 @@ impl<'tcx> MirPass<'tcx> for ElaborateDrops {
             let body = &*body;
             let env = MoveDataParamEnv { move_data, param_env };
             let dead_unwinds = find_dead_unwinds(tcx, body, def_id, &env);
-            let flow_inits = do_dataflow(
+            let flow_inits = dataflow::generic::Engine::new_gen_kill(
                 tcx,
                 body,
                 def_id,
-                &[],
                 &dead_unwinds,
                 MaybeInitializedPlaces::new(tcx, body, &env),
-                |bd, p| DebugFormatted::new(&bd.move_data().move_paths[p]),
-            );
+            )
+            .iterate_to_fixpoint();
+
             let flow_uninits = do_dataflow(
                 tcx,
                 body,
@@ -87,15 +88,10 @@ fn find_dead_unwinds<'tcx>(
     // We only need to do this pass once, because unwind edges can only
     // reach cleanup blocks, which can't have unwind edges themselves.
     let mut dead_unwinds = BitSet::new_empty(body.basic_blocks().len());
-    let flow_inits = do_dataflow(
-        tcx,
-        body,
-        def_id,
-        &[],
-        &dead_unwinds,
-        MaybeInitializedPlaces::new(tcx, body, &env),
-        |bd, p| DebugFormatted::new(&bd.move_data().move_paths[p]),
-    );
+    let flow_inits = MaybeInitializedPlaces::new(tcx, body, &env);
+    let flow_inits =
+        dataflow::generic::Engine::new_gen_kill(tcx, body, def_id, &dead_unwinds, flow_inits)
+            .iterate_to_fixpoint();
     for (bb, bb_data) in body.basic_blocks().iter_enumerated() {
         let location = match bb_data.terminator().kind {
             TerminatorKind::Drop { ref location, unwind: Some(_), .. }
@@ -104,7 +100,7 @@ fn find_dead_unwinds<'tcx>(
         };
 
         let mut init_data = InitializationData {
-            live: flow_inits.sets().entry_set_for(bb.index()).to_owned(),
+            live: flow_inits.on_block_entry(bb).clone(),
             dead: BitSet::new_empty(env.move_data.move_paths.len()),
         };
         debug!("find_dead_unwinds @ {:?}: {:?}; init_data={:?}", bb, bb_data, init_data.live);
@@ -283,7 +279,7 @@ struct ElaborateDropsCtxt<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'a Body<'tcx>,
     env: &'a MoveDataParamEnv<'tcx>,
-    flow_inits: DataflowResults<'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
+    flow_inits: Results<'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
     flow_uninits: DataflowResults<'tcx, MaybeUninitializedPlaces<'a, 'tcx>>,
     drop_flags: FxHashMap<MovePathIndex, Local>,
     patch: MirPatch<'tcx>,
@@ -300,7 +296,7 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
 
     fn initialization_data_at(&self, loc: Location) -> InitializationData {
         let mut data = InitializationData {
-            live: self.flow_inits.sets().entry_set_for(loc.block.index()).to_owned(),
+            live: self.flow_inits.on_block_entry(loc.block).to_owned(),
             dead: self.flow_uninits.sets().entry_set_for(loc.block.index()).to_owned(),
         };
         for stmt in 0..loc.statement_index {
