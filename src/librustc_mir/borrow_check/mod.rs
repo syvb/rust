@@ -4,8 +4,8 @@ use rustc::infer::InferCtxt;
 use rustc::lint::builtin::MUTABLE_BORROW_RESERVATION_CONFLICT;
 use rustc::lint::builtin::UNUSED_MUT;
 use rustc::mir::{
-    read_only, Body, BodyAndCache, ClearCrossCrate, Local, Location, Mutability, Operand, Place,
-    PlaceElem, PlaceRef, ReadOnlyBodyAndCache,
+    read_only, traversal, Body, BodyAndCache, ClearCrossCrate, Local, Location, Mutability,
+    Operand, Place, PlaceElem, PlaceRef, ReadOnlyBodyAndCache,
 };
 use rustc::mir::{AggregateKind, BasicBlock, BorrowCheckResult, BorrowKind};
 use rustc::mir::{Field, ProjectionElem, Promoted, Rvalue, Statement, StatementKind};
@@ -18,7 +18,6 @@ use rustc_data_structures::graph::dominators::Dominators;
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder};
 use rustc_hir as hir;
 use rustc_hir::{def_id::DefId, HirId, Node};
-use rustc_index::bit_set::BitSet;
 use rustc_index::vec::IndexVec;
 
 use smallvec::SmallVec;
@@ -30,14 +29,13 @@ use std::rc::Rc;
 use rustc_span::{Span, DUMMY_SP};
 use syntax::ast::Name;
 
+use crate::dataflow;
+use crate::dataflow::generic::ResultsCursor;
 use crate::dataflow::indexes::{BorrowIndex, InitIndex, MoveOutIndex, MovePathIndex};
-use crate::dataflow::move_paths::{HasMoveData, InitLocation, LookupResult, MoveData, MoveError};
+use crate::dataflow::move_paths::{InitLocation, LookupResult, MoveData, MoveError, MovePath};
 use crate::dataflow::Borrows;
-use crate::dataflow::DataflowResultsConsumer;
 use crate::dataflow::EverInitializedPlaces;
-use crate::dataflow::FlowAtLocation;
 use crate::dataflow::MoveDataParamEnv;
-use crate::dataflow::{self, do_dataflow, DebugFormatted};
 use crate::dataflow::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
 use crate::transform::MirSource;
 
@@ -115,7 +113,6 @@ fn do_mir_borrowck<'a, 'tcx>(
     debug!("do_mir_borrowck(def_id = {:?})", def_id);
 
     let tcx = infcx.tcx;
-    let attributes = tcx.get_attrs(def_id);
     let param_env = tcx.param_env(def_id);
     let id = tcx.hir().as_local_hir_id(def_id).expect("do_mir_borrowck: non-local DefId");
 
@@ -188,12 +185,10 @@ fn do_mir_borrowck<'a, 'tcx>(
 
     let mdpe = MoveDataParamEnv { move_data, param_env };
 
-    let dead_unwinds = BitSet::new_empty(body.basic_blocks().len());
     let flow_inits = MaybeInitializedPlaces::new(tcx, &body, &mdpe);
-    let mut flow_inits =
-        dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, &dead_unwinds, flow_inits)
-            .iterate_to_fixpoint()
-            .into_cursor(&body);
+    let mut flow_inits = dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_inits)
+        .iterate_to_fixpoint()
+        .into_results_cursor(&body);
 
     let locals_are_invalidated_at_exit = tcx.hir().body_owner_kind(id).is_fn_or_closure();
     let borrow_set =
@@ -229,33 +224,19 @@ fn do_mir_borrowck<'a, 'tcx>(
 
     let regioncx = Rc::new(regioncx);
 
-    let flow_borrows = FlowAtLocation::new(do_dataflow(
-        tcx,
-        &body,
-        def_id,
-        &attributes,
-        &dead_unwinds,
-        Borrows::new(tcx, &body, regioncx.clone(), &borrow_set),
-        |rs, i| DebugFormatted::new(&rs.location(i)),
-    ));
-    let flow_uninits = FlowAtLocation::new(do_dataflow(
-        tcx,
-        &body,
-        def_id,
-        &attributes,
-        &dead_unwinds,
-        MaybeUninitializedPlaces::new(tcx, &body, &mdpe),
-        |bd, i| DebugFormatted::new(&bd.move_data().move_paths[i]),
-    ));
-    let flow_ever_inits = FlowAtLocation::new(do_dataflow(
-        tcx,
-        &body,
-        def_id,
-        &attributes,
-        &dead_unwinds,
-        EverInitializedPlaces::new(tcx, &body, &mdpe),
-        |bd, i| DebugFormatted::new(&bd.move_data().inits[i]),
-    ));
+    let flow_borrows = Borrows::new(tcx, &body, regioncx.clone(), &borrow_set);
+    let flow_borrows = dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_borrows)
+        .iterate_to_fixpoint()
+        .into_cursor(&body);
+    let flow_uninits = MaybeUninitializedPlaces::new(tcx, &body, &mdpe);
+    let flow_uninits = dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_uninits)
+        .iterate_to_fixpoint()
+        .into_cursor(&body);
+    let flow_ever_inits = EverInitializedPlaces::new(tcx, &body, &mdpe);
+    let flow_ever_inits =
+        dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_ever_inits)
+            .iterate_to_fixpoint()
+            .into_cursor(&body);
 
     let movable_generator = match tcx.hir().get(id) {
         Node::Expr(&hir::Expr {
@@ -300,7 +281,23 @@ fn do_mir_borrowck<'a, 'tcx>(
     if let Some(errors) = move_errors {
         mbcx.report_move_errors(errors);
     }
-    mbcx.analyze_results(&mut state); // entry point for DataflowResultsConsumer
+
+    // FIXME: refactor into visitor
+    for (block, block_data) in traversal::reverse_postorder(*body) {
+        for (statement_index, stmt) in block_data.statements.iter().enumerate() {
+            let loc = Location { block, statement_index };
+            state.borrows.seek_before(loc);
+            state.uninits.seek_before(loc);
+            state.ever_inits.seek_before(loc);
+            mbcx.visit_statement_entry(loc, &stmt, &mut state);
+        }
+
+        let loc = body.terminator_loc(block);
+        state.borrows.seek_before(loc);
+        state.uninits.seek_before(loc);
+        state.ever_inits.seek_before(loc);
+        mbcx.visit_terminator_entry(loc, block_data.terminator(), &mut state);
+    }
 
     // Convert any reservation warnings into lints.
     let reservation_warnings = mem::take(&mut mbcx.reservation_warnings);
@@ -503,22 +500,16 @@ crate struct MirBorrowckCtxt<'cx, 'tcx> {
 // 2. loans made in overlapping scopes do not conflict
 // 3. assignments do not affect things loaned out as immutable
 // 4. moves do not affect things loaned out in any way
-impl<'cx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx> {
-    type FlowState = Flows<'cx, 'tcx>;
-
+impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     fn body(&self) -> &'cx Body<'tcx> {
         *self.body
-    }
-
-    fn visit_block_entry(&mut self, bb: BasicBlock, flow_state: &Self::FlowState) {
-        debug!("MirBorrowckCtxt::process_block({:?}): {}", bb, flow_state);
     }
 
     fn visit_statement_entry(
         &mut self,
         location: Location,
         stmt: &'cx Statement<'tcx>,
-        flow_state: &Self::FlowState,
+        flow_state: &mut Flows<'cx, 'tcx>,
     ) {
         debug!("MirBorrowckCtxt::process_statement({:?}, {:?}): {}", location, stmt, flow_state);
         let span = stmt.source_info.span;
@@ -605,15 +596,14 @@ impl<'cx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx
 
     fn visit_terminator_entry(
         &mut self,
-        location: Location,
+        loc: Location,
         term: &'cx Terminator<'tcx>,
-        flow_state: &Self::FlowState,
+        flow_state: &mut Flows<'cx, 'tcx>,
     ) {
-        let loc = location;
-        debug!("MirBorrowckCtxt::process_terminator({:?}, {:?}): {}", location, term, flow_state);
+        debug!("MirBorrowckCtxt::process_terminator({:?}, {:?}): {}", loc, term, flow_state);
         let span = term.source_info.span;
 
-        self.check_activations(location, span, flow_state);
+        self.check_activations(loc, span, flow_state);
 
         match term.kind {
             TerminatorKind::SwitchInt { ref discr, switch_ty: _, values: _, targets: _ } => {
@@ -686,12 +676,14 @@ impl<'cx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx
                 if self.movable_generator {
                     // Look for any active borrows to locals
                     let borrow_set = self.borrow_set.clone();
-                    flow_state.with_outgoing_borrows(|borrows| {
-                        for i in borrows {
-                            let borrow = &borrow_set[i];
-                            self.check_for_local_borrow(borrow, span);
-                        }
-                    });
+
+                    // FIXME: Don't call `seek_after` manually, instead use a visitor that visits
+                    // the exit of a basic block.
+                    flow_state.borrows.seek_after(loc);
+                    for i in flow_state.borrows.get().iter() {
+                        let borrow = &borrow_set[i];
+                        self.check_for_local_borrow(borrow, span);
+                    }
                 }
             }
 
@@ -701,12 +693,14 @@ impl<'cx, 'tcx> DataflowResultsConsumer<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx
                 // StorageDead, but we don't always emit those (notably on unwind paths),
                 // so this "extra check" serves as a kind of backup.
                 let borrow_set = self.borrow_set.clone();
-                flow_state.with_outgoing_borrows(|borrows| {
-                    for i in borrows {
-                        let borrow = &borrow_set[i];
-                        self.check_for_invalidation_at_exit(loc, borrow, span);
-                    }
-                });
+
+                // FIXME: Don't call `seek_after` manually, instead use a visitor that visits
+                // the exit of a basic block.
+                flow_state.borrows.seek_after(loc);
+                for i in flow_state.borrows.get().iter() {
+                    let borrow = &borrow_set[i];
+                    self.check_for_invalidation_at_exit(loc, borrow, span);
+                }
             }
             TerminatorKind::Goto { target: _ }
             | TerminatorKind::Abort
@@ -1469,9 +1463,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             // initial reservation.
         }
     }
-}
 
-impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     fn check_if_reassignment_to_immutable_state(
         &mut self,
         location: Location,
@@ -1561,21 +1553,26 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         location: Location,
         desired_action: InitializationRequiringAction,
         place_span: (PlaceRef<'cx, 'tcx>, Span),
-        maybe_uninits: &FlowAtLocation<'tcx, MaybeUninitializedPlaces<'cx, 'tcx>>,
+        maybe_uninits: &ResultsCursor<'cx, 'tcx, MaybeUninitializedPlaces<'cx, 'tcx>>,
         from: u32,
         to: u32,
     ) {
         if let Some(mpi) = self.move_path_for_place(place_span.0) {
-            let mut child = self.move_data.move_paths[mpi].first_child;
+            let move_paths = &self.move_data.move_paths;
+            let mut child = move_paths[mpi].first_child;
             while let Some(child_mpi) = child {
-                let child_move_place = &self.move_data.move_paths[child_mpi];
-                let child_place = &child_move_place.place;
-                let last_proj = child_place.projection.last().unwrap();
+                let child_move_path = &move_paths[child_mpi];
+                let last_proj = child_move_path.place.projection.last().unwrap();
                 if let ProjectionElem::ConstantIndex { offset, from_end, .. } = last_proj {
                     debug_assert!(!from_end, "Array constant indexing shouldn't be `from_end`.");
 
                     if (from..to).contains(offset) {
-                        if let Some(uninit_child) = maybe_uninits.has_any_child_of(child_mpi) {
+                        let uninit_child =
+                            find_in_move_path_or_its_descendants(child_mpi, move_paths, |mpi| {
+                                maybe_uninits.contains(mpi)
+                            });
+
+                        if let Some(uninit_child) = uninit_child {
                             self.report_use_of_moved_or_uninitialized(
                                 location,
                                 desired_action,
@@ -1586,7 +1583,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                         }
                     }
                 }
-                child = child_move_place.next_sibling;
+                child = child_move_path.next_sibling;
             }
         }
     }
@@ -1647,12 +1644,17 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         debug!("check_if_path_or_subpath_is_moved place: {:?}", place_span.0);
         if let Some(mpi) = self.move_path_for_place(place_span.0) {
-            if let Some(child_mpi) = maybe_uninits.has_any_child_of(mpi) {
+            let uninit_mpi =
+                find_in_move_path_or_its_descendants(mpi, &self.move_data.move_paths, |mpi| {
+                    maybe_uninits.contains(mpi)
+                });
+
+            if let Some(uninit_mpi) = uninit_mpi {
                 self.report_use_of_moved_or_uninitialized(
                     location,
                     desired_action,
                     (place_span.0, place_span.0, place_span.1),
-                    child_mpi,
+                    uninit_mpi,
                 );
                 return; // don't bother finding other problems.
             }
@@ -2222,4 +2224,16 @@ enum Overlap {
     /// The places are disjoint, so we know all extensions of them
     /// will also be disjoint.
     Disjoint,
+}
+
+fn find_in_move_path_or_its_descendants(
+    root: MovePathIndex,
+    move_paths: &IndexVec<MovePathIndex, MovePath<'tcx>>,
+    pred: impl Fn(MovePathIndex) -> bool,
+) -> Option<MovePathIndex> {
+    if pred(root) {
+        return Some(root);
+    }
+
+    move_paths[root].find_descendant(move_paths, pred)
 }
