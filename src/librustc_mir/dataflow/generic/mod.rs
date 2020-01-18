@@ -43,6 +43,7 @@ use crate::dataflow::BottomValue;
 mod cursor;
 mod engine;
 mod graphviz;
+pub mod visitor;
 
 pub use self::cursor::{ResultsCursor, ResultsRefCursor};
 pub use self::engine::Engine;
