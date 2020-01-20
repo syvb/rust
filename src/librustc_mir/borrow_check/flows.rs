@@ -3,6 +3,8 @@
 //! FIXME: this might be better as a "generic" fixed-point combinator,
 //! but is not as ugly as it is right now.
 
+#![allow(unused)]
+
 use crate::borrow_check::location::LocationIndex;
 
 use crate::borrow_check::nll::PoloniusOutput;

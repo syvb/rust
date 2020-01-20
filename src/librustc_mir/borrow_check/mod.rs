@@ -18,6 +18,7 @@ use rustc_data_structures::graph::dominators::Dominators;
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder};
 use rustc_hir as hir;
 use rustc_hir::{def_id::DefId, HirId, Node};
+use rustc_index::bit_set::BitSet;
 use rustc_index::vec::IndexVec;
 
 use smallvec::SmallVec;
@@ -30,7 +31,9 @@ use rustc_span::{Span, DUMMY_SP};
 use syntax::ast::Name;
 
 use crate::dataflow;
-use crate::dataflow::generic::ResultsCursor;
+use crate::dataflow::generic::visitor::{
+    visit_results, BorrowckAnalyses, BorrowckResults, ResultsVisitable, ResultsVisitor,
+};
 use crate::dataflow::indexes::{BorrowIndex, InitIndex, MoveOutIndex, MovePathIndex};
 use crate::dataflow::move_paths::{InitLocation, LookupResult, MoveData, MoveError, MovePath};
 use crate::dataflow::Borrows;
@@ -40,7 +43,6 @@ use crate::dataflow::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
 use crate::transform::MirSource;
 
 use self::diagnostics::{AccessKind, RegionName};
-use self::flows::Flows;
 use self::location::LocationTable;
 use self::prefixes::PrefixSet;
 use self::MutateMode::{JustWrite, WriteAndRead};
@@ -195,7 +197,7 @@ fn do_mir_borrowck<'a, 'tcx>(
         Rc::new(BorrowSet::build(tcx, body, locals_are_invalidated_at_exit, &mdpe.move_data));
 
     // Compute non-lexical lifetimes.
-    let nll::NllOutput { regioncx, polonius_output, opt_closure_req, nll_errors } =
+    let nll::NllOutput { regioncx, polonius_output: _, opt_closure_req, nll_errors } =
         nll::compute_regions(
             infcx,
             def_id,
@@ -226,17 +228,14 @@ fn do_mir_borrowck<'a, 'tcx>(
 
     let flow_borrows = Borrows::new(tcx, &body, regioncx.clone(), &borrow_set);
     let flow_borrows = dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_borrows)
-        .iterate_to_fixpoint()
-        .into_cursor(&body);
+        .iterate_to_fixpoint();
     let flow_uninits = MaybeUninitializedPlaces::new(tcx, &body, &mdpe);
     let flow_uninits = dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_uninits)
-        .iterate_to_fixpoint()
-        .into_cursor(&body);
+        .iterate_to_fixpoint();
     let flow_ever_inits = EverInitializedPlaces::new(tcx, &body, &mdpe);
     let flow_ever_inits =
         dataflow::generic::Engine::new_gen_kill(tcx, &body, def_id, flow_ever_inits)
-            .iterate_to_fixpoint()
-            .into_cursor(&body);
+            .iterate_to_fixpoint();
 
     let movable_generator = match tcx.hir().get(id) {
         Node::Expr(&hir::Expr {
@@ -276,28 +275,22 @@ fn do_mir_borrowck<'a, 'tcx>(
     // Compute and report region errors, if any.
     mbcx.report_region_errors(nll_errors);
 
-    let mut state = Flows::new(flow_borrows, flow_uninits, flow_ever_inits, polonius_output);
+    let results = BorrowckAnalyses {
+        ever_inits: flow_ever_inits,
+        uninits: flow_uninits,
+        borrows: flow_borrows,
+    };
 
     if let Some(errors) = move_errors {
         mbcx.report_move_errors(errors);
     }
 
-    // FIXME: refactor into visitor
-    for (block, block_data) in traversal::reverse_postorder(*body) {
-        for (statement_index, stmt) in block_data.statements.iter().enumerate() {
-            let loc = Location { block, statement_index };
-            state.borrows.seek_before(loc);
-            state.uninits.seek_before(loc);
-            state.ever_inits.seek_before(loc);
-            mbcx.visit_statement_entry(loc, &stmt, &mut state);
-        }
-
-        let loc = body.terminator_loc(block);
-        state.borrows.seek_before(loc);
-        state.uninits.seek_before(loc);
-        state.ever_inits.seek_before(loc);
-        mbcx.visit_terminator_entry(loc, block_data.terminator(), &mut state);
-    }
+    visit_results(
+        &*body,
+        traversal::reverse_postorder(&*body).map(|(bb, _)| bb),
+        &results,
+        &mut mbcx,
+    );
 
     // Convert any reservation warnings into lints.
     let reservation_warnings = mem::take(&mut mbcx.reservation_warnings);
@@ -495,23 +488,23 @@ crate struct MirBorrowckCtxt<'cx, 'tcx> {
     next_region_name: RefCell<usize>,
 }
 
+type Flows<'mir, 'tcx> = <BorrowckResults<'mir, 'tcx> as ResultsVisitable<'tcx>>::FlowState;
+
 // Check that:
 // 1. assignments are always made to mutable locations (FIXME: does that still really go here?)
 // 2. loans made in overlapping scopes do not conflict
 // 3. assignments do not affect things loaned out as immutable
 // 4. moves do not affect things loaned out in any way
-impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
-    fn body(&self) -> &'cx Body<'tcx> {
-        *self.body
-    }
+impl<'cx, 'tcx> ResultsVisitor<'cx, 'tcx> for MirBorrowckCtxt<'cx, 'tcx> {
+    type FlowState = Flows<'cx, 'tcx>;
 
-    fn visit_statement_entry(
+    fn visit_statement(
         &mut self,
-        location: Location,
+        flow_state: &Flows<'cx, 'tcx>,
         stmt: &'cx Statement<'tcx>,
-        flow_state: &mut Flows<'cx, 'tcx>,
+        location: Location,
     ) {
-        debug!("MirBorrowckCtxt::process_statement({:?}, {:?}): {}", location, stmt, flow_state);
+        debug!("MirBorrowckCtxt::process_statement({:?}, {:?}): {:?}", location, stmt, flow_state);
         let span = stmt.source_info.span;
 
         self.check_activations(location, span, flow_state);
@@ -594,13 +587,13 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         }
     }
 
-    fn visit_terminator_entry(
+    fn visit_terminator(
         &mut self,
-        loc: Location,
+        flow_state: &Flows<'cx, 'tcx>,
         term: &'cx Terminator<'tcx>,
-        flow_state: &mut Flows<'cx, 'tcx>,
+        loc: Location,
     ) {
-        debug!("MirBorrowckCtxt::process_terminator({:?}, {:?}): {}", loc, term, flow_state);
+        debug!("MirBorrowckCtxt::process_terminator({:?}, {:?}): {:?}", loc, term, flow_state);
         let span = term.source_info.span;
 
         self.check_activations(loc, span, flow_state);
@@ -672,18 +665,36 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
             TerminatorKind::Yield { ref value, resume: _, drop: _ } => {
                 self.consume_operand(loc, (value, span), flow_state);
+            }
 
-                if self.movable_generator {
-                    // Look for any active borrows to locals
-                    let borrow_set = self.borrow_set.clone();
+            TerminatorKind::Goto { target: _ }
+            | TerminatorKind::Abort
+            | TerminatorKind::Unreachable
+            | TerminatorKind::Resume
+            | TerminatorKind::Return
+            | TerminatorKind::GeneratorDrop
+            | TerminatorKind::FalseEdges { real_target: _, imaginary_target: _ }
+            | TerminatorKind::FalseUnwind { real_target: _, unwind: _ } => {
+                // no data used, thus irrelevant to borrowck
+            }
+        }
+    }
 
-                    // FIXME: Don't call `seek_after` manually, instead use a visitor that visits
-                    // the exit of a basic block.
-                    flow_state.borrows.seek_after(loc);
-                    for i in flow_state.borrows.get().iter() {
-                        let borrow = &borrow_set[i];
-                        self.check_for_local_borrow(borrow, span);
-                    }
+    fn visit_terminator_exit(
+        &mut self,
+        flow_state: &Flows<'cx, 'tcx>,
+        term: &'cx Terminator<'tcx>,
+        loc: Location,
+    ) {
+        let span = term.source_info.span;
+
+        match term.kind {
+            TerminatorKind::Yield { value: _, resume: _, drop: _ } if self.movable_generator => {
+                // Look for any active borrows to locals
+                let borrow_set = self.borrow_set.clone();
+                for i in flow_state.borrows.iter() {
+                    let borrow = &borrow_set[i];
+                    self.check_for_local_borrow(borrow, span);
                 }
             }
 
@@ -693,22 +704,13 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 // StorageDead, but we don't always emit those (notably on unwind paths),
                 // so this "extra check" serves as a kind of backup.
                 let borrow_set = self.borrow_set.clone();
-
-                // FIXME: Don't call `seek_after` manually, instead use a visitor that visits
-                // the exit of a basic block.
-                flow_state.borrows.seek_after(loc);
-                for i in flow_state.borrows.get().iter() {
+                for i in flow_state.borrows.iter() {
                     let borrow = &borrow_set[i];
                     self.check_for_invalidation_at_exit(loc, borrow, span);
                 }
             }
-            TerminatorKind::Goto { target: _ }
-            | TerminatorKind::Abort
-            | TerminatorKind::Unreachable
-            | TerminatorKind::FalseEdges { real_target: _, imaginary_target: _ }
-            | TerminatorKind::FalseUnwind { real_target: _, unwind: _ } => {
-                // no data used, thus irrelevant to borrowck
-            }
+
+            _ => {}
         }
     }
 }
@@ -843,6 +845,10 @@ impl InitializationRequiringAction {
 }
 
 impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
+    fn body(&self) -> &'cx Body<'tcx> {
+        *self.body
+    }
+
     /// Checks an access to the given place to see if it is allowed. Examines the set of borrows
     /// that are in scope, as well as which paths have been initialized, to ensure that (a) the
     /// place is initialized and (b) it is not borrowed in some way that would prevent this
@@ -922,7 +928,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         let tcx = self.infcx.tcx;
         let body = self.body;
         let body: &Body<'_> = &body;
-        let location_table = self.location_table.start_index(location);
+        let _location_table = self.location_table.start_index(location);
         let borrow_set = self.borrow_set.clone();
         each_borrow_involving_path(
             self,
@@ -931,7 +937,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             location,
             (sd, place_span.0),
             &borrow_set,
-            flow_state.borrows_in_scope(location_table),
+            // flow_state.borrows_in_scope(location_table),
+            flow_state.borrows.iter(),
             |this, borrow_index, borrow| match (rw, borrow.kind) {
                 // Obviously an activation is compatible with its own
                 // reservation (or even prior activating uses of same
@@ -1553,7 +1560,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         location: Location,
         desired_action: InitializationRequiringAction,
         place_span: (PlaceRef<'cx, 'tcx>, Span),
-        maybe_uninits: &ResultsCursor<'cx, 'tcx, MaybeUninitializedPlaces<'cx, 'tcx>>,
+        maybe_uninits: &BitSet<MovePathIndex>,
         from: u32,
         to: u32,
     ) {
