@@ -3916,9 +3916,9 @@ fn print_sidebar(cx: &Context, it: &clean::Item, buffer: &mut Buffer) {
         if let Some(repo_url) = &cx.cache.repo_url {
             write!(
                 buffer,
-                r#"<div class='block version'>\
-                    <p><a href="{}">Repository</a></p>\
-                    </div>"#,
+                "<div class='block version'>\
+                    <p><a href='{}'>Repository</a></p>\
+                    </div>",
                 Escape(&repo_url)
             );
         }
