@@ -200,8 +200,6 @@ crate struct SharedContext {
     /// The default edition used to parse doctests.
     pub edition: Edition,
     pub codes: ErrorCodes,
-    /// Repo URL displayed in crate sidebar.
-    pub repo_url: Option<String>,
     playground: Option<markdown::Playground>,
 }
 
@@ -547,14 +545,13 @@ pub fn run(
         edition,
         codes: ErrorCodes::from(UnstableFeatures::from_environment().is_nightly_build()),
         playground,
-        repo_url,
     };
 
     let dst = output;
     scx.ensure_dir(&dst)?;
     krate = sources::render(&dst, &mut scx, krate)?;
     let (new_crate, index, cache) =
-        Cache::from_krate(renderinfo, document_private, &extern_html_root_urls, &dst, krate);
+        Cache::from_krate(renderinfo, repo_url, document_private, &extern_html_root_urls, &dst, krate);
     krate = new_crate;
     let cache = Arc::new(cache);
     let mut cx = Context {
@@ -3905,6 +3902,18 @@ fn print_sidebar(cx: &Context, it: &clean::Item, buffer: &mut Buffer) {
                     <p>Version {}</p>\
                     </div>",
                 Escape(version)
+            );
+        }
+    }
+
+    if it.is_crate() {
+        if let Some(repo_url) = &cx.cache.repo_url {
+            write!(
+                buffer,
+                r#"<div class='block version'>\
+                    <p><a href="{}">Repository</a></p>\
+                    </div>"#,
+                Escape(&repo_url)
             );
         }
     }

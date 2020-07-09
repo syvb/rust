@@ -95,6 +95,9 @@ crate struct Cache {
     /// This is stored in `Cache` so it doesn't need to be passed through all rustdoc functions.
     pub document_private: bool,
 
+    /// Repo URL, displayed on main crate page.
+    pub repo_url: Option<String>,
+
     // Private fields only used when initially crawling a crate to build a cache
     stack: Vec<String>,
     parent_stack: Vec<DefId>,
@@ -130,6 +133,7 @@ crate struct Cache {
 impl Cache {
     pub fn from_krate(
         renderinfo: RenderInfo,
+        repo_url: Option<String>,
         document_private: bool,
         extern_html_root_urls: &BTreeMap<String, String>,
         dst: &Path,
@@ -174,6 +178,7 @@ impl Cache {
             owned_box_did,
             masked_crates: mem::take(&mut krate.masked_crates),
             aliases: Default::default(),
+            repo_url,
         };
 
         // Cache where all our extern crates are located
