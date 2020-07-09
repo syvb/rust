@@ -411,6 +411,14 @@ fn opts() -> Vec<RustcOptGroup> {
                 "specified the rustc-like binary to use as the test builder",
             )
         }),
+        stable("repo", |o| {
+            o.optopt(
+                "",
+                "repo",
+                "",
+                "Specifies a repository to display on the crate sidebar",
+            )
+        }),
     ]
 }
 

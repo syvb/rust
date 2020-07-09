@@ -96,6 +96,10 @@ pub struct Options {
     pub describe_lints: bool,
     /// What level to cap lints at.
     pub lint_cap: Option<Level>,
+    /// Repository URL displayed on sidebar for crates.
+    ///
+    /// Be aware: This option can come both from the CLI and from crate attributes!
+    pub repo_url: Option<String>,
 
     // Options specific to running doctests
     /// Whether we should run doctests instead of generating docs.
@@ -536,6 +540,7 @@ impl Options {
         let enable_per_target_ignores = matches.opt_present("enable-per-target-ignores");
         let document_private = matches.opt_present("document-private-items");
         let document_hidden = matches.opt_present("document-hidden-items");
+        let repo_url = matches.opt_str("repo");
 
         let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(matches, error_format);
 
@@ -571,6 +576,7 @@ impl Options {
             runtool_args,
             enable_per_target_ignores,
             test_builder,
+            repo_url,
             render_options: RenderOptions {
                 output,
                 external_html,
