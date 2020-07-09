@@ -96,11 +96,6 @@ pub struct Options {
     pub describe_lints: bool,
     /// What level to cap lints at.
     pub lint_cap: Option<Level>,
-    /// Repository URL displayed on sidebar for crates.
-    ///
-    /// Be aware: This option can come both from the CLI and from crate attributes!
-    pub repo_url: Option<String>,
-
     // Options specific to running doctests
     /// Whether we should run doctests instead of generating docs.
     pub should_test: bool,
@@ -250,6 +245,11 @@ pub struct RenderOptions {
     pub document_private: bool,
     /// Document items that have `doc(hidden)`.
     pub document_hidden: bool,
+    /// Repository URL displayed on sidebar for crates.
+    ///
+    /// Be aware: This option can come both from the CLI and from crate attributes! If there is a
+    /// conflict, the crate attributes will be used.
+    pub repo_url: Option<String>,
 }
 
 impl Options {
@@ -576,7 +576,6 @@ impl Options {
             runtool_args,
             enable_per_target_ignores,
             test_builder,
-            repo_url,
             render_options: RenderOptions {
                 output,
                 external_html,
@@ -597,6 +596,7 @@ impl Options {
                 generate_search_filter,
                 document_private,
                 document_hidden,
+                repo_url,
             },
             output_format,
         })

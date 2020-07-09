@@ -200,6 +200,8 @@ crate struct SharedContext {
     /// The default edition used to parse doctests.
     pub edition: Edition,
     pub codes: ErrorCodes,
+    /// Repo URL displayed in crate sidebar.
+    pub repo_url: Option<String>,
     playground: Option<markdown::Playground>,
 }
 
@@ -459,6 +461,7 @@ pub fn run(
         external_html,
         id_map,
         playground_url,
+        repo_url: repo_url_render_opt,
         sort_modules_alphabetically,
         themes,
         extension_css,
@@ -482,6 +485,10 @@ pub fn run(
     let mut playground = None;
     if let Some(url) = playground_url {
         playground = Some(markdown::Playground { crate_name: Some(krate.name.clone()), url });
+    }
+    let mut repo_url = None;
+    if repo_url_render_opt.is_some() {
+        repo_url = repo_url_render_opt;
     }
     let mut layout = layout::Layout {
         logo: String::new(),
@@ -517,6 +524,9 @@ pub fn run(
                 (sym::html_no_source, None) if attr.is_word() => {
                     include_sources = false;
                 }
+                (sym::repository, Some(s)) => {
+                    repo_url = Some(s.to_string());
+                }
                 _ => {}
             }
         }
@@ -537,6 +547,7 @@ pub fn run(
         edition,
         codes: ErrorCodes::from(UnstableFeatures::from_environment().is_nightly_build()),
         playground,
+        repo_url,
     };
 
     let dst = output;

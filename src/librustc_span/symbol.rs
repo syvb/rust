@@ -683,6 +683,7 @@ symbols! {
         register_attr,
         register_tool,
         relaxed_adts,
+        repository,
         repr,
         repr128,
         repr_align,
