@@ -550,8 +550,14 @@ pub fn run(
     let dst = output;
     scx.ensure_dir(&dst)?;
     krate = sources::render(&dst, &mut scx, krate)?;
-    let (new_crate, index, cache) =
-        Cache::from_krate(renderinfo, repo_url, document_private, &extern_html_root_urls, &dst, krate);
+    let (new_crate, index, cache) = Cache::from_krate(
+        renderinfo,
+        repo_url,
+        document_private,
+        &extern_html_root_urls,
+        &dst,
+        krate,
+    );
     krate = new_crate;
     let cache = Arc::new(cache);
     let mut cx = Context {

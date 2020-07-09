@@ -412,12 +412,7 @@ fn opts() -> Vec<RustcOptGroup> {
             )
         }),
         stable("repo", |o| {
-            o.optopt(
-                "",
-                "repo",
-                "",
-                "Specifies a repository to display on the crate sidebar",
-            )
+            o.optopt("", "repo", "", "Specifies a repository to display on the crate sidebar")
         }),
     ]
 }
