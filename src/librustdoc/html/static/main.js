@@ -422,6 +422,7 @@ function defocusSearchBar() {
 
             case "s":
             case "S":
+            case "/":
                 displayHelp(false, ev);
                 ev.preventDefault();
                 focusSearchBar();
@@ -2900,7 +2901,7 @@ function defocusSearchBar() {
         var container = document.createElement("div");
         var shortcuts = [
             ["?", "Show this help dialog"],
-            ["S", "Focus the search field"],
+            ["S or /", "Focus the search field"],
             ["T", "Focus the theme picker menu"],
             ["↑", "Move up in search results"],
             ["↓", "Move down in search results"],
