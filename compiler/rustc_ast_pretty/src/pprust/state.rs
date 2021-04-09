@@ -140,12 +140,14 @@ pub fn print_crate<'a>(
 // and also addresses some specific regressions described in #63896 and #73345.
 fn tt_prepend_space(tt: &TokenTree, prev: &TokenTree) -> bool {
     if let TokenTree::Token(token) = prev {
-        if let token::DocComment(comment_kind, ..) = token.kind {
-            return comment_kind != CommentKind::Line;
+        match token.kind {
+            token::DocComment(comment_kind, ..) => return comment_kind != CommentKind::Line,
+            token::ModSep => return false,
+            _ => (),
         }
     }
     match tt {
-        TokenTree::Token(token) => token.kind != token::Comma,
+        TokenTree::Token(token) => token.kind != token::Comma && token.kind != token::ModSep,
         TokenTree::Delimited(_, DelimToken::Paren, _) => {
             !matches!(prev, TokenTree::Token(Token { kind: token::Ident(..), .. }))
         }
