@@ -4,7 +4,7 @@ error: recursion limit reached while expanding `test!`
 LL | test!(test);
    | ^^^^^^^^^^^^
    |
-   = help: consider adding a `#![recursion_limit="0"]` attribute to your crate (`zero`)
+   = help: consider adding a `#![recursion_limit="128"]` attribute to your crate (`zero`)
 
 error: aborting due to previous error
 

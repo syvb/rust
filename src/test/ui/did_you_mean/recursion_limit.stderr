@@ -7,7 +7,7 @@ LL | fn is_send<T:Send>() { }
 LL |     is_send::<A>();
    |     ^^^^^^^^^^^^
    |
-   = help: consider adding a `#![recursion_limit="20"]` attribute to your crate (`recursion_limit`)
+   = help: consider adding a `#![recursion_limit="128"]` attribute to your crate (`recursion_limit`)
 note: required because it appears within the type `J`
   --> $DIR/recursion_limit.rs:24:9
    |

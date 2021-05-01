@@ -81,6 +81,15 @@ impl Limit {
     pub fn value_within_limit(&self, value: usize) -> bool {
         value <= self.0
     }
+
+    /// Suggest a new limit for when the current limit has been reached.
+    pub fn suggest_new_limit(self) -> Self {
+        if self.0 >= 128 {
+            self * 2
+        } else {
+            Self(128)
+        }
+    }
 }
 
 impl From<usize> for Limit {

@@ -643,7 +643,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
 
     fn error_recursion_limit_reached(&mut self) {
         let expn_data = self.cx.current_expansion.id.expn_data();
-        let suggested_limit = self.cx.ecfg.recursion_limit * 2;
+        let suggested_limit = self.cx.ecfg.recursion_limit.suggest_new_limit();
         self.cx
             .struct_span_err(
                 expn_data.call_site,
