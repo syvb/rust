@@ -525,6 +525,17 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 );
                 Ok(true)
             }
+            ty::Str => {
+                let mplace = value.assert_mem_place(self.ecx);
+                try_validation!(
+                    value.to_bool(),
+                    self.path,
+                    err_ub!(InvalidBool(..)) | err_ub!(InvalidUninitBytes(None)) =>
+                        { "{}", value } expected { "a boolean" },
+                );
+                self.ecx.read_str(&mplace)?;
+                Ok(true)
+            }
             ty::Char => {
                 let value = self.read_scalar(value)?;
                 try_validation!(
@@ -618,7 +629,6 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
             | ty::Tuple(..)
             | ty::Array(..)
             | ty::Slice(..)
-            | ty::Str
             | ty::Dynamic(..)
             | ty::Closure(..)
             | ty::Generator(..) => Ok(false),
