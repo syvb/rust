@@ -2724,7 +2724,10 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, id: DefId) -> CodegenFnAttrs {
         } else if tcx.sess.check_name(attr, sym::naked) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED;
         } else if tcx.sess.check_name(attr, sym::no_mangle) {
-            codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
+            // no_mangle is ignored on items other than functions and statics
+            if let DefKind::Static | DefKind::Fn | DefKind::AssocFn = tcx.def_kind(id) {
+                codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
+            }
         } else if tcx.sess.check_name(attr, sym::no_coverage) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_COVERAGE;
         } else if tcx.sess.check_name(attr, sym::rustc_std_internal_symbol) {
