@@ -1071,25 +1071,11 @@ impl HandlerInner {
         // haven't already emitted an equivalent diagnostic.
         if !(self.flags.deduplicate_diagnostics && already_emitted(self)) {
             self.emitter.emit_diagnostic(diagnostic);
-            if diagnostic.is_error() {
-                self.deduplicated_err_count += 1;
-            } else if diagnostic.level == Warning {
-                self.deduplicated_warn_count += 1;
-            }
+            self.deduplicated_warn_count += 1;
         }
-        if diagnostic.is_error() {
-            if matches!(diagnostic.level, Level::Error { lint: true }) {
-                self.bump_lint_err_count();
-            } else {
-                self.bump_err_count();
-            }
+        self.bump_warn_count();
 
-            Some(ErrorGuaranteed::unchecked_claim_error_was_emitted())
-        } else {
-            self.bump_warn_count();
-
-            None
-        }
+        None
     }
 
     fn emit_artifact_notification(&mut self, path: &Path, artifact_type: &str) {
